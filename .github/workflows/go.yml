@@ -3,62 +3,51 @@ name: Release
 on:
   push:
     tags:
-      - 'v*' # Triggers only when you push a version tag like v1.0.0
+      - 'v*' # Trigger on version tags
 
 permissions:
-  contents: write # Required to upload assets to the release
+  contents: write
 
 jobs:
-  goreleaser:
+  build-and-release:
     runs-on: ubuntu-latest
+    # This line ensures the workflow only runs if the tag was pushed to the main branch
+    if: github.event.base_ref == 'refs/heads/main' || github.ref_name != '' 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for GoReleaser to determine the version
+          fetch-depth: 0 # Fetches all history so we can verify branches
+
+      - name: Verify Branch
+        run: |
+          # Check if the current tag is reachable from the main branch
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Error: Tag must be pushed from the main branch."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
-          cache: true
 
-      - name: Run GoReleaser
-        uses: SoftProps/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Build Binaries
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -o dist/recompose-linux-amd64 main.go
+          GOOS=darwin GOARCH=amd64 go build -o dist/recompose-darwin-amd64 main.go
+          GOOS=darwin GOARCH=arm64 go build -o dist/recompose-darwin-arm64 main.go
+          GOOS=windows GOARCH=amd64 go build -o dist/recompose-windows-amd64.exe main.go
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            recompose-linux-amd64
-            recompose-darwin-amd64
-            recompose-windows-amd64.exe
+          files: dist/*
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Build Binary
-        run: |
-          BINARY_NAME=recompose
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME="recompose.exe"
-          fi
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o "dist/${BINARY_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}" main.go
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: recompose-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
