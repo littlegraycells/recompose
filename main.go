@@ -14,6 +14,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var Version = "v0.0.1"
+
+const (
+	ColorReset  = "\033[0m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorCyan   = "\033[36m"
+	ColorRed    = "\033[31m"
+	ColorGray   = "\033[90m"
+)
+
 type Change struct {
 	Service string
 	OldLine string
@@ -24,23 +35,23 @@ type Change struct {
 
 func main() {
 	var filePath string
-	var genCompose bool
-	var genEnv bool
-	var overwrite bool
+	var genCompose, genEnv, showVersion bool
 
 	flag.StringVar(&filePath, "file", "", "Path to the docker-compose file")
 	flag.StringVar(&filePath, "F", "", "Shorthand for --file")
 	flag.BoolVar(&genCompose, "generate-compose", true, "Generate the refactored compose file")
-	flag.BoolVar(&genCompose, "C", true, "Shorthand for --generate-compose")
 	flag.BoolVar(&genEnv, "generate-env", true, "Generate the .env file")
-	flag.BoolVar(&genEnv, "E", true, "Shorthand for --generate-env")
-	flag.BoolVar(&overwrite, "overwrite", true, "Overwrite existing files")
-	flag.BoolVar(&overwrite, "O", true, "Shorthand for --overwrite")
-
+	flag.BoolVar(&showVersion, "version", false, "Print version information")
+	flag.BoolVar(&showVersion, "V", false, "Shorthand for --version")
 	flag.Parse()
 
+	if showVersion {
+		fmt.Printf("Recompose %s\n", Version)
+		return
+	}
+
 	if filePath == "" {
-		fmt.Println("Error: --file | -F is required.")
+		fmt.Printf("%sError: --file | -F is required.%s\n", ColorRed, ColorReset)
 		os.Exit(1)
 	}
 
@@ -60,6 +71,8 @@ func main() {
 		log.Fatalf("Error parsing YAML: %v", err)
 	}
 
+	applyTopLevelSpacing(&root)
+
 	servicesNode := findNode(&root, "services")
 	if servicesNode == nil {
 		log.Fatal("Validation Failed: No services block found.")
@@ -68,6 +81,9 @@ func main() {
 	changes := []Change{}
 	for i := 0; i < len(servicesNode.Content); i += 2 {
 		serviceName := servicesNode.Content[i].Value
+		if i > 0 {
+			servicesNode.Content[i].HeadComment = "\n"
+		}
 		envNode := findNode(servicesNode.Content[i+1], "environment")
 		if envNode != nil {
 			processEnvBlock(serviceName, envNode, &changes)
@@ -75,69 +91,147 @@ func main() {
 	}
 
 	if len(changes) == 0 {
-		fmt.Println("No changes needed.")
+		fmt.Println("No hardcoded environment variables found. No changes needed.")
 		return
 	}
 
 	printTable(changes)
 
 	if !genCompose && !genEnv {
-		fmt.Println("\nMode: TRY RUN. No files will be generated.")
+		fmt.Printf("\n%sMode: TRY RUN. No files will be generated.%s\n", ColorCyan, ColorReset)
 		return
 	}
 
-	// PROMPT: This now uses a standard buffer that waits for the Enter key
 	fmt.Printf("\nApply changes? (y/N): ")
 	if askConfirmation() {
 		os.MkdirAll(recomposeDir, 0755)
 		if genEnv {
-			handleWrite(newEnvPath, overwrite, func() { writeFormattedEnvFile(newEnvPath, changes) })
+			writeFormattedEnvFile(newEnvPath, changes)
+			fmt.Printf("%s- Created/Replaced: %s%s\n", ColorGreen, newEnvPath, ColorReset)
 		}
 		if genCompose {
-			handleWrite(newComposePath, overwrite, func() {
-				out, _ := yaml.Marshal(&root)
-				ioutil.WriteFile(newComposePath, out, 0644)
-			})
+			f, _ := os.Create(newComposePath)
+			trimmedData := strings.TrimSpace(string(data))
+			if !strings.HasPrefix(trimmedData, "---") {
+				f.WriteString("---\n")
+			}
+			enc := yaml.NewEncoder(f)
+			enc.SetIndent(2)
+			enc.Encode(&root)
+			f.Close()
+			fmt.Printf("%s- Created/Replaced: %s%s\n", ColorGreen, newComposePath, ColorReset)
 		}
-	} else {
-		fmt.Println("Aborted. No files written.")
 	}
 }
 
-// askConfirmation: Standard buffered input that waits for 'Enter'
-func askConfirmation() bool {
-	reader := bufio.NewReader(os.Stdin)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false
+func applyTopLevelSpacing(root *yaml.Node) {
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		topMap := root.Content[0]
+		for i := 2; i < len(topMap.Content); i += 2 {
+			topMap.Content[i].HeadComment = "\n"
+		}
 	}
-
-	response = strings.ToLower(strings.TrimSpace(response))
-	if response == "y" || response == "yes" {
-		return true
-	}
-	return false
 }
 
-// --- REMAINING HELPERS (findNode, processEnvBlock, printTable, handleWrite, writeFormattedEnvFile) ---
-
-func handleWrite(path string, canOverwrite bool, writeFunc func()) {
-	if _, err := os.Stat(path); err == nil && !canOverwrite {
-		fmt.Printf("Skipped: %s (File exists and overwrite is false)\n", filepath.Base(path))
-		return
+func maskValue(key, value string) string {
+	lowKey := strings.ToLower(key)
+	sensitives := []string{"pass", "secret", "token", "key", "auth"}
+	for _, s := range sensitives {
+		if strings.Contains(lowKey, s) {
+			return "********"
+		}
 	}
-	writeFunc()
-	fmt.Printf("- Created: %s\n", path)
+	return value
+}
+
+func printTable(changes []Change) {
+	wSrv, wOld, wNew := 18, 35, 35
+	fmt.Printf("\n%s┌%s┬%s┬%s┐%s\n", ColorGray, strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2), ColorReset)
+	fmt.Printf("│ %-18s │ %-35s │ %-35s │\n", "SERVICE", "CURRENT (MASKED)", "PROPOSED")
+	fmt.Printf("%s╞%s╪%s╪%s╡%s\n", ColorGray, strings.Repeat("=", wSrv+2), strings.Repeat("=", wOld+2), strings.Repeat("=", wNew+2), ColorReset)
+
+	for i, c := range changes {
+		maskedVal := maskValue(c.Key, c.Value)
+		displayOld := fmt.Sprintf("%s: %s", c.Key, maskedVal)
+		fmt.Printf("│ %-18.18s │ %s%-35.35s%s │ %s%-35.35s%s │\n",
+			c.Service, ColorYellow, displayOld, ColorReset, ColorGreen, c.NewLine, ColorReset)
+		if i < len(changes)-1 && changes[i+1].Service != c.Service {
+			fmt.Printf("%s├%s┼%s┼%s┤%s\n", ColorGray, strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2), ColorReset)
+		}
+	}
+	fmt.Printf("%s└%s┴%s┴%s┘%s\n", ColorGray, strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2), ColorReset)
+}
+
+func writeFormattedEnvFile(path string, changes []Change) {
+	keyUsage := make(map[string]map[string]int)
+	serviceVars := make(map[string][]string)
+	for _, c := range changes {
+		if _, ok := keyUsage[c.Key]; !ok {
+			keyUsage[c.Key] = make(map[string]int)
+		}
+		keyUsage[c.Key][c.Value]++
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# RECOMPOSE GENERATED ENV\n")
+	sb.WriteString("# GLOBAL VARIABLES\n")
+
+	globals := []string{}
+	processedGlobals := make(map[string]bool)
+	for key, valMap := range keyUsage {
+		if len(valMap) > 1 || (len(valMap) == 1 && getFirstValCount(valMap) > 1) {
+			for val := range valMap {
+				globals = append(globals, fmt.Sprintf("%s=%s", key, val))
+			}
+			processedGlobals[key] = true
+		}
+	}
+	sort.Strings(globals)
+	for _, g := range globals {
+		sb.WriteString(g + "\n")
+	}
+
+	for _, c := range changes {
+		if !processedGlobals[c.Key] {
+			serviceVars[c.Service] = append(serviceVars[c.Service], fmt.Sprintf("%s=%s", c.Key, c.Value))
+		}
+	}
+
+	srvKeys := make([]string, 0, len(serviceVars))
+	for k := range serviceVars {
+		srvKeys = append(srvKeys, k)
+	}
+	sort.Strings(srvKeys)
+
+	for _, srv := range srvKeys {
+		sb.WriteString(fmt.Sprintf("\n# SERVICE: %s\n", strings.ToUpper(srv)))
+		sort.Strings(serviceVars[srv])
+		for _, v := range serviceVars[srv] {
+			sb.WriteString(v + "\n")
+		}
+	}
+	ioutil.WriteFile(path, []byte(sb.String()), 0644)
+}
+
+func getFirstValCount(m map[string]int) int {
+	for _, v := range m {
+		return v
+	}
+	return 0
 }
 
 func findNode(node *yaml.Node, key string) *yaml.Node {
 	if node.Kind == yaml.DocumentNode {
-		if len(node.Content) == 0 { return nil }
+		if len(node.Content) == 0 {
+			return nil
+		}
 		return findNode(node.Content[0], key)
 	}
 	if node.Kind == yaml.MappingNode {
 		for i := 0; i < len(node.Content); i += 2 {
-			if node.Content[i].Value == key { return node.Content[i+1] }
+			if node.Content[i].Value == key {
+				return node.Content[i+1]
+			}
 		}
 	}
 	return nil
@@ -149,8 +243,8 @@ func processEnvBlock(service string, envNode *yaml.Node, changes *[]Change) {
 			k, v := envNode.Content[i], envNode.Content[i+1]
 			if !strings.Contains(v.Value, "${") {
 				*changes = append(*changes, Change{
-					Service: service, OldLine: k.Value + ": " + v.Value,
-					NewLine: k.Value + ": ${" + k.Value + "}", Key: k.Value, Value: v.Value,
+					Service: service, Key: k.Value, Value: v.Value,
+					NewLine: k.Value + ": ${" + k.Value + "}",
 				})
 				v.Value = "${" + k.Value + "}"
 			}
@@ -160,8 +254,8 @@ func processEnvBlock(service string, envNode *yaml.Node, changes *[]Change) {
 			parts := strings.SplitN(item.Value, "=", 2)
 			if len(parts) == 2 && !strings.Contains(parts[1], "${") {
 				*changes = append(*changes, Change{
-					Service: service, OldLine: item.Value,
-					NewLine: parts[0] + "=${" + parts[0] + "}", Key: parts[0], Value: parts[1],
+					Service: service, Key: parts[0], Value: parts[1],
+					NewLine: parts[0] + "=${" + parts[0] + "}",
 				})
 				item.Value = parts[0] + "=${" + parts[0] + "}"
 			}
@@ -169,52 +263,8 @@ func processEnvBlock(service string, envNode *yaml.Node, changes *[]Change) {
 	}
 }
 
-func printTable(changes []Change) {
-	wSrv, wOld, wNew := 22, 40, 40
-	line := fmt.Sprintf("├%s┼%s┼%s┤", strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2))
-	fmt.Printf("\n┌%s┬%s┬%s┐\n", strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2))
-	fmt.Printf("│ %-22s │ %-40s │ %-40s │\n", "SERVICE", "CURRENT LINE", "PROPOSED LINE")
-	fmt.Printf("╞%s╪%s╪%s╡\n", strings.Repeat("=", wSrv+2), strings.Repeat("=", wOld+2), strings.Repeat("=", wNew+2))
-	for i, c := range changes {
-		fmt.Printf("│ %-22.22s │ %-40.40s │ %-40.40s │\n", c.Service, c.OldLine, c.NewLine)
-		if i < len(changes)-1 && changes[i+1].Service != c.Service { fmt.Println(line) }
-	}
-	fmt.Printf("└%s┴%s┴%s┘\n", strings.Repeat("-", wSrv+2), strings.Repeat("-", wOld+2), strings.Repeat("-", wNew+2))
-}
-
-func writeFormattedEnvFile(path string, changes []Change) {
-	keyUsage := make(map[string]map[string]int)
-	serviceVars := make(map[string][]string)
-	for _, c := range changes {
-		if _, ok := keyUsage[c.Key]; !ok { keyUsage[c.Key] = make(map[string]int) }
-		keyUsage[c.Key][c.Value]++
-	}
-	globals := []string{}
-	processedGlobals := make(map[string]bool)
-	for key, valMap := range keyUsage {
-		for val, count := range valMap {
-			if count > 1 {
-				globals = append(globals, key+"="+val)
-				processedGlobals[key] = true
-			}
-		}
-	}
-	sort.Strings(globals)
-	for _, c := range changes {
-		if !processedGlobals[c.Key] {
-			serviceVars[c.Service] = append(serviceVars[c.Service], c.Key+"="+c.Value)
-		}
-	}
-	var sb strings.Builder
-	sb.WriteString("# GLOBAL VARIABLES\n")
-	for _, g := range globals { sb.WriteString(g + "\n") }
-	var services []string
-	for s := range serviceVars { services = append(services, s) }
-	sort.Strings(services)
-	for _, s := range services {
-		sb.WriteString(fmt.Sprintf("\n# SERVICE: %s\n", strings.ToUpper(s)))
-		sort.Strings(serviceVars[s])
-		for _, v := range serviceVars[s] { sb.WriteString(v + "\n") }
-	}
-	ioutil.WriteFile(path, []byte(sb.String()), 0644)
+func askConfirmation() bool {
+	reader := bufio.NewReader(os.Stdin)
+	response, _ := reader.ReadString('\n')
+	return strings.ToLower(strings.TrimSpace(response)) == "y"
 }

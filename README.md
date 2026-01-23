@@ -31,6 +31,17 @@ mv recompose /usr/local/bin/
 ./recompose -F docker-compose.yml
 ```
 
+### Options
+
+| Flag                | Shorthand | Default  | Description                                            |
+| ------------------- | --------- | -------- | ------------------------------------------------------ |
+| \--file             | \-F       | Required | Path to the source docker-compose.yml file.            |
+| \--generate-compose |           | TRUE     | Creates a refactored compose.yml in the output folder. |
+| \--generate-env     |           | TRUE     | Creates a formatted .env file in the output folder.    |
+| \--version          | \-V       |          | Prints the current version of the binary.              |
+| \--help             | \-h       |          | Displays all available commands and flags.             |
+
+
 ### Example: Dry Run
 To see the proposed changes without creating any files, set both generation flags to false:
 
