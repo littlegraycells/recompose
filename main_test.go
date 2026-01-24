@@ -25,3 +25,22 @@ func TestFindNode(t *testing.T) {
 		t.Fatal("Could not find services node")
 	}
 }
+
+func TestIntegerPortRefactoring(t *testing.T) {
+	yml := "environment:\n  SMTP_PORT: 587"
+	var node yaml.Node
+	yaml.Unmarshal([]byte(yml), &node)
+
+	// Target the SMTP_PORT value node
+	envNode := node.Content[0].Content[1]
+	changes := []Change{}
+	processEnvBlock("test-service", envNode, &changes)
+
+	valNode := envNode.Content[1]
+	if valNode.Tag != "!!str" {
+		t.Errorf("Expected Tag to be !!str, got %s", valNode.Tag)
+	}
+	if valNode.Value != "${SMTP_PORT}" {
+		t.Errorf("Expected value ${SMTP_PORT}, got %s", valNode.Value)
+	}
+}

@@ -243,10 +243,14 @@ func processEnvBlock(service string, envNode *yaml.Node, changes *[]Change) {
 			k, v := envNode.Content[i], envNode.Content[i+1]
 			if !strings.Contains(v.Value, "${") {
 				*changes = append(*changes, Change{
-					Service: service, Key: k.Value, Value: v.Value,
+					Service: service,
+					Key:     k.Value,
+					Value:   v.Value,
 					NewLine: k.Value + ": ${" + k.Value + "}",
 				})
+
 				v.Value = "${" + k.Value + "}"
+				v.Tag = "!!str"
 			}
 		}
 	} else if envNode.Kind == yaml.SequenceNode {
@@ -254,10 +258,14 @@ func processEnvBlock(service string, envNode *yaml.Node, changes *[]Change) {
 			parts := strings.SplitN(item.Value, "=", 2)
 			if len(parts) == 2 && !strings.Contains(parts[1], "${") {
 				*changes = append(*changes, Change{
-					Service: service, Key: parts[0], Value: parts[1],
+					Service: service,
+					Key:     parts[0],
+					Value:   parts[1],
 					NewLine: parts[0] + "=${" + parts[0] + "}",
 				})
+
 				item.Value = parts[0] + "=${" + parts[0] + "}"
+				item.Tag = "!!str"
 			}
 		}
 	}
